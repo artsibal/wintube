@@ -2349,48 +2349,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // ===== DRAG & DROP SUPPORT =====
-  document.body.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'copy';
-  });
-
-  document.body.addEventListener('drop', (e) => {
-    e.preventDefault();
-
-    // Handle dropped files (local audio)
-    if (e.dataTransfer.files.length > 0) {
-      const audioExtensions = ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'wma'];
-      let addedCount = 0;
-      Array.from(e.dataTransfer.files).forEach(file => {
-        const ext = file.name.split('.').pop().toLowerCase();
-        if (audioExtensions.includes(ext)) {
-          const title = file.name.replace(/\.[^.]+$/, '');
-          addToPlaylist(null, title, 'Local File', null, 0, true, file.path);
-          addedCount++;
-        }
-      });
-      if (addedCount > 0) {
-        showToast(`Dropped ${addedCount} file(s)`);
-      }
-      return;
-    }
-
-    // Handle dropped text (YouTube URLs)
-    const text = e.dataTransfer.getData('text/plain');
-    if (text) {
-      const videoId = parseYouTubeUrl(text);
-      if (videoId) {
-        addToPlaylist(videoId, 'Loading...', '', `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`, 0, false);
-        showToast('Added from dropped URL');
-        if (!state.isPlaying) {
-          playTrack(state.playlist.length - 1);
-        }
-      }
-    }
-  });
-});
-
 // ===== ELECTRON INTEGRATION =====
 if (state.isElectron) {
   window.electronAPI.onMediaControl((action) => {
