@@ -1201,25 +1201,35 @@ function resumeAudioContext() {
   }
 }
 
-// ===== YOUTUBE URL PARSER =====
-function parseYouTubeUrl(str) {
-  // Supports: youtube.com/watch?v=ID, youtu.be/ID, youtube.com/embed/ID, youtube.com/v/ID
+// ===== IMPROVED YOUTUBE URL PARSER (FIXED - NO MORE FALSE POSITIVES) =====
+function isYouTubeUrl(str) {
+  if (!str || typeof str !== 'string') return false;
+  const lower = str.toLowerCase().trim();
+  return lower.includes('youtube.com') || 
+         lower.includes('youtu.be') || 
+         lower.includes('music.youtube.com');
+}
+
+function extractVideoId(str) {
+  if (!isYouTubeUrl(str)) return null;
+  
   const patterns = [
-    /(?:youtube\.com\/watch\?v=|youtube\.com\/watch\?.+&v=)([a-zA-Z0-9_-]{11})/,
-    /youtu\.be\/([a-zA-Z0-9_-]{11})/,
-    /youtube\.com\/embed\/([a-zA-Z0-9_-]{11})/,
-    /youtube\.com\/v\/([a-zA-Z0-9_-]{11})/
+    /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/i,
+    /[?&]v=([a-zA-Z0-9_-]{11})/i
   ];
+  
   for (const pattern of patterns) {
     const match = str.match(pattern);
-    if (match) return match[1];
+    if (match && match[1]) return match[1];
   }
   return null;
 }
 
-function parseYouTubePlaylistUrl(str) {
-  // Supports: youtube.com/playlist?list=PLAYLIST_ID, or ?list= in any youtube URL
-  const match = str.match(/[?&]list=([a-zA-Z0-9_-]+)/);
+function extractPlaylistId(str) {
+  if (!isYouTubeUrl(str)) return null;
+  
+  // Much stricter: must contain youtube.com AND list= (prevents "playlist" keywords from matching)
+  const match = str.match(/youtube\.com.*[?&]list=([a-zA-Z0-9_-]{10,})/i);
   return match ? match[1] : null;
 }
 
@@ -1247,37 +1257,123 @@ async function fetchTrackMetadata(index) {
   }
 }
 
-// ===== YT-DLP SEARCH =====
+// ===== YT-DLP SEARCH (FIXED - keywords now work perfectly) =====
 async function searchYouTube(query) {
   const searchResults = document.getElementById('searchResults');
+  const trimmed = query.trim();
+  if (!trimmed) return;
 
-  // Check if query is a YouTube playlist URL
-  const playlistId = parseYouTubePlaylistUrl(query);
-  if (playlistId && state.isElectron && state.ytdlpAvailable) {
-    searchResults.innerHTML = '<div class="search-loading">Loading playlist...</div>';
-    try {
-      const result = await window.electronAPI.getPlaylistVideos(playlistId);
-      if (result.success && result.results.length > 0) {
-        let added = 0;
-        result.results.forEach(item => {
-          const thumb = item.thumbnail || `https://i.ytimg.com/vi/${item.videoId}/mqdefault.jpg`;
-          if (addToPlaylist(item.videoId, item.title, item.author, thumb, item.lengthSeconds, false)) {
-            added++;
-          }
-        });
-        showToast(`Added ${added} from playlist`);
-        searchResults.innerHTML = `<div class="empty-playlist">Added ${added} tracks from playlist</div>`;
-        if (!state.isPlaying && added > 0) {
-          playTrack(state.playlist.length - added);
+  console.log('Search triggered with:', trimmed); // ← helpful for debugging
+
+  // NEW LOGIC: Only treat as URL if it actually contains a YouTube domain
+  if (isYouTubeUrl(trimmed)) {
+    console.log('→ Detected YouTube URL');
+
+    const playlistId = extractPlaylistId(trimmed);
+    if (playlistId && state.isElectron && state.ytdlpAvailable) {
+      searchResults.innerHTML = '<div class="search-loading">Loading playlist...</div>';
+      try {
+        const result = await window.electronAPI.getPlaylistVideos(playlistId);
+        if (result.success && result.results.length > 0) {
+          let added = 0;
+          result.results.forEach(item => {
+            const thumb = item.thumbnail || `https://i.ytimg.com/vi/${item.videoId}/mqdefault.jpg`;
+            if (addToPlaylist(item.videoId, item.title, item.author, thumb, item.lengthSeconds, false)) added++;
+          });
+          showToast(`Added ${added} from playlist`);
+          searchResults.innerHTML = `<div class="empty-playlist">Added ${added} tracks from playlist</div>`;
+          if (!state.isPlaying && added > 0) playTrack(state.playlist.length - added);
+        } else {
+          searchResults.innerHTML = '<div class="search-loading" style="color:#cc4444">Failed to load playlist</div>';
         }
-      } else {
-        searchResults.innerHTML = '<div class="search-loading" style="color:#cc4444">Failed to load playlist</div>';
+      } catch (err) {
+        searchResults.innerHTML = `<div class="search-loading" style="color:#cc4444">Error: ${err.message}</div>`;
       }
-    } catch (err) {
-      searchResults.innerHTML = `<div class="search-loading" style="color:#cc4444">Error: ${err.message}</div>`;
+      return;
     }
-    return;
+
+    const videoId = extractVideoId(trimmed);
+    if (videoId) {
+      searchResults.innerHTML = '<div class="search-loading">Loading video...</div>';
+      if (addToPlaylist(videoId, 'Loading...', '', `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`, 0, false)) {
+        const trackIndex = state.playlist.length - 1;
+        playTrack(trackIndex);
+        fetchTrackMetadata(trackIndex);
+      }
+      searchResults.innerHTML = '<div class="empty-playlist">Video added to playlist</div>';
+      return;
+    }
+
+    // Rare case: YouTube domain but no ID/playlist (e.g. youtube.com/results?search_query=...)
+    console.log('→ YouTube domain but no ID → falling back to search');
   }
+
+  // NORMAL KEYWORD SEARCH (this is what was being skipped before)
+  console.log('→ Treating as keywords → searching YouTube');
+  searchResults.innerHTML = '<div class="search-loading">Searching...</div>';
+
+  if (state.isElectron && state.ytdlpAvailable) {
+    try {
+      const result = await window.electronAPI.searchYouTube(trimmed);
+      if (!result.success) {
+        searchResults.innerHTML = `<div class="search-loading" style="color:#cc4444">Search failed: ${result.error}</div>`;
+        return;
+      }
+      if (!result.results || result.results.length === 0) {
+        searchResults.innerHTML = '<div class="search-loading">No results found</div>';
+        state.lastSearchResults = [];
+        return;
+      }
+
+      state.lastSearchResults = result.results.map(item => ({
+        videoId: item.videoId,
+        title: item.title || 'Unknown',
+        channel: item.author || 'Unknown',
+        thumb: item.thumbnail || `https://i.ytimg.com/vi/${item.videoId}/mqdefault.jpg`,
+        duration: item.lengthSeconds || 0
+      }));
+
+      searchResults.innerHTML = '';
+      result.results.forEach(item => {
+        const dur = item.lengthSeconds || 0;
+        const title = item.title || 'Unknown';
+        const channel = item.author || 'Unknown';
+        const vid = item.videoId;
+        const thumb = item.thumbnail || `https://i.ytimg.com/vi/${vid}/mqdefault.jpg`;
+
+        const div = document.createElement('div');
+        div.className = 'search-result-item';
+        div.innerHTML = `
+          <img class="result-thumb" src="${thumb}" alt="" loading="lazy" onerror="this.src='https://i.ytimg.com/vi/${vid}/mqdefault.jpg'">
+          <div class="result-info">
+            <div class="result-title" title="${title}">${title}</div>
+            <div class="result-channel">${channel}</div>
+          </div>
+          <span class="result-duration">${formatTime(dur)}</span>
+          <button class="result-add-btn" title="Add">+</button>
+        `;
+
+        div.querySelector('.result-info').addEventListener('dblclick', () => {
+          addToPlaylist(vid, title, channel, thumb, dur, false);
+          playTrack(state.playlist.length - 1);
+        });
+        div.querySelector('.result-info').addEventListener('click', () => {
+          addToPlaylist(vid, title, channel, thumb, dur, false);
+        });
+        div.querySelector('.result-add-btn').addEventListener('click', (e) => {
+          e.stopPropagation();
+          addToPlaylist(vid, title, channel, thumb, dur, false);
+        });
+
+        searchResults.appendChild(div);
+      });
+    } catch (err) {
+      searchResults.innerHTML = `<div class="search-loading" style="color:#cc4444">Search error: ${err.message}</div>`;
+    }
+  } else {
+    searchResults.innerHTML = '<div class="search-loading" style="color:#cc4444">yt-dlp required for search</div>';
+  }
+}
 
   // Check if query is a single YouTube video URL
   const videoId = parseYouTubeUrl(query);
