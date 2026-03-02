@@ -30,44 +30,38 @@ function isValidVideoId(videoId) {
 // yt-dlp helper to extract audio URL with format info
 function getAudioUrl(videoId) {
   return new Promise((resolve, reject) => {
-    // Security validation
     if (!isValidVideoId(videoId)) {
       reject(new Error('Invalid video ID format'));
       return;
     }
 
-    const ytdlp = spawn(YTDLP_CMD, [
+    // FIXED: Replaced stray ` with videoId, and removed { shell: true }
+    const ytdlp = spawn(YTDLP_CMD,[
       '-f', 'bestaudio',
       '--print', '%(url)s',
       '--print', '%(abr)s|%(asr)s|%(audio_channels)s',
       '--no-warnings',
       '--sponsorblock-remove', 'sponsor,selfpromo,interaction,intro,outro',
-      `https://www.youtube.com/watch?v=${videoId}`
-    ], { shell: true });
+      videoId
+    ]); 
 
     let stdout = '';
     let stderr = '';
 
-    // Timeout handler
     const timeout = setTimeout(() => {
       ytdlp.kill();
       reject(new Error('Request timed out'));
     }, YTDLP_TIMEOUT);
 
-    ytdlp.stdout.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    ytdlp.stderr.on('data', (data) => {
-      stderr += data.toString();
-    });
+    ytdlp.stdout.on('data', (data) => stdout += data.toString());
+    ytdlp.stderr.on('data', (data) => stderr += data.toString());
 
     ytdlp.on('close', (code) => {
       clearTimeout(timeout);
       if (code === 0 && stdout.trim()) {
-        const lines = stdout.trim().split('\n');
-        const url = lines[0]; // First line is URL
-        const formatInfo = lines[1] || ''; // Second line is format info
+        const lines = stdout.trim().split(/\r?\n/); // FIXED: Windows \r\n support
+        const url = lines[0];
+        const formatInfo = lines[1] || '';
         const [abr, asr, channels] = formatInfo.split('|');
         resolve({
           url,
@@ -80,9 +74,9 @@ function getAudioUrl(videoId) {
       }
     });
 
-    ytdlp.on('error', (err) => {
+    ytdlp.on('error', () => {
       clearTimeout(timeout);
-      reject(new Error('yt-dlp not found. Please install it: https://github.com/yt-dlp/yt-dlp'));
+      reject(new Error('yt-dlp not found.'));
     });
   });
 }
@@ -285,60 +279,58 @@ ipcMain.handle('check-ytdlp', async () => {
 });
 
 // Search YouTube via yt-dlp
-ipcMain.handle('search-youtube', async (event, query) => {
-  return new Promise((resolve) => {
-    // Sanitize query - remove pipe characters to prevent parsing issues
-    const safeQuery = query.replace(/\|/g, ' ');
+function getAudioUrl(videoId) {
+  return new Promise((resolve, reject) => {
+    if (!isValidVideoId(videoId)) {
+      reject(new Error('Invalid video ID format'));
+      return;
+    }
 
-    const ytdlp = spawn(YTDLP_CMD, [
-      `ytsearch25:${safeQuery}`,
-      '--flat-playlist',
-      '--print', '%(id)s\t%(title)s\t%(channel)s\t%(duration)s\t%(thumbnail)s',
-      '--no-warnings'
-    ], { shell: true });
+    // FIXED: Replaced stray ` with videoId, and removed { shell: true }
+    const ytdlp = spawn(YTDLP_CMD,[
+      '-f', 'bestaudio',
+      '--print', '%(url)s',
+      '--print', '%(abr)s|%(asr)s|%(audio_channels)s',
+      '--no-warnings',
+      '--sponsorblock-remove', 'sponsor,selfpromo,interaction,intro,outro',
+      videoId
+    ]); 
 
     let stdout = '';
     let stderr = '';
 
-    // Timeout handler
     const timeout = setTimeout(() => {
       ytdlp.kill();
-      resolve({ success: false, error: 'Search timed out' });
+      reject(new Error('Request timed out'));
     }, YTDLP_TIMEOUT);
 
-    ytdlp.stdout.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    ytdlp.stderr.on('data', (data) => {
-      stderr += data.toString();
-    });
+    ytdlp.stdout.on('data', (data) => stdout += data.toString());
+    ytdlp.stderr.on('data', (data) => stderr += data.toString());
 
     ytdlp.on('close', (code) => {
       clearTimeout(timeout);
       if (code === 0 && stdout.trim()) {
-        const results = stdout.trim().split('\n').map(line => {
-          const [id, title, channel, duration, thumbnail] = line.split('\t');
-          return {
-            videoId: id,
-            title: title || 'Unknown',
-            author: channel || 'Unknown',
-            lengthSeconds: parseInt(duration) || 0,
-            thumbnail: thumbnail || ''
-          };
-        }).filter(r => r.videoId && r.videoId.length === 11);
-        resolve({ success: true, results });
+        const lines = stdout.trim().split(/\r?\n/); // FIXED: Windows \r\n support
+        const url = lines[0];
+        const formatInfo = lines[1] || '';
+        const [abr, asr, channels] = formatInfo.split('|');
+        resolve({
+          url,
+          bitrate: abr && abr !== 'NA' ? Math.round(parseFloat(abr)) : null,
+          sampleRate: asr && asr !== 'NA' ? Math.round(parseFloat(asr) / 1000) : null,
+          channels: channels && channels !== 'NA' ? parseInt(channels) : null
+        });
       } else {
-        resolve({ success: false, error: stderr || 'Search failed' });
+        reject(new Error(stderr || 'Failed to get audio URL'));
       }
     });
 
     ytdlp.on('error', () => {
       clearTimeout(timeout);
-      resolve({ success: false, error: 'yt-dlp not found' });
+      reject(new Error('yt-dlp not found.'));
     });
   });
-});
+}
 
 // Fetch YouTube playlist videos
 ipcMain.handle('get-playlist-videos', async (event, playlistId) => {
@@ -406,12 +398,13 @@ ipcMain.handle('get-video-info', async (event, videoId) => {
       return;
     }
 
-    const ytdlp = spawn(YTDLP_CMD, [
-      `https://www.youtube.com/watch?v=${videoId}`,
+    // FIXED: Replaced stray ` with videoId, and removed { shell: true }
+    const ytdlp = spawn(YTDLP_CMD,[
+      videoId,
       '--print', '%(title)s\t%(channel)s\t%(duration)s',
       '--no-warnings',
       '--skip-download'
-    ], { shell: true });
+    ]);
 
     let stdout = '';
 
@@ -420,9 +413,7 @@ ipcMain.handle('get-video-info', async (event, videoId) => {
       resolve({ success: false, error: 'Timed out' });
     }, 15000);
 
-    ytdlp.stdout.on('data', (data) => {
-      stdout += data.toString();
-    });
+    ytdlp.stdout.on('data', (data) => stdout += data.toString());
 
     ytdlp.on('close', (code) => {
       clearTimeout(timeout);
